@@ -133,11 +133,5 @@ func (t *timestampValue) Get() any {
 
 // Timestamp gets the timestamp from a flag name
 func (cmd *Command) Timestamp(name string) time.Time {
-	if v, ok := cmd.Value(name).(time.Time); ok {
-		tracef("time.Time available for flag name %[1]q with value=%[2]v (cmd=%[3]q)", name, v, cmd.Name)
-		return v
-	}
-
-	tracef("time.Time NOT available for flag name %[1]q (cmd=%[2]q)", name, cmd.Name)
-	return time.Time{}
+	return getFlagValue[time.Time](cmd, name)
 }
