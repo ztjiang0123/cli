@@ -218,11 +218,19 @@ func (cmd *Command) setupSubcommand() {
 
 func flagNamesInUse(flags []Flag, names []string) bool {
 	for _, name := range names {
-		for _, fl := range flags {
-			for _, flagName := range fl.Names() {
-				if flagName == name {
-					return true
-				}
+		if flagsContainName(flags, name) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func flagsContainName(flags []Flag, name string) bool {
+	for _, fl := range flags {
+		for _, flagName := range fl.Names() {
+			if flagName == name {
+				return true
 			}
 		}
 	}
@@ -255,34 +263,38 @@ func (cmd *Command) hideHelpCommand() bool {
 func (cmd *Command) ensureHelp() {
 	tracef("ensuring help (cmd=%[1]q)", cmd.Name)
 
-	helpCommand := buildHelpCommand(true)
-
-	if !cmd.hideHelp() {
-		if cmd.Command(helpCommand.Name) == nil {
-			if !cmd.hideHelpCommand() {
-				tracef("appending helpCommand (cmd=%[1]q)", cmd.Name)
-				cmd.appendCommand(helpCommand)
-			}
-		}
-
-		if HelpFlag != nil {
-			if !cmd.globaHelpFlagAdded {
-				var localHelpFlag Flag
-				if globalHelpFlag, ok := HelpFlag.(*BoolFlag); ok {
-					flag := *globalHelpFlag
-					localHelpFlag = &flag
-				} else {
-					localHelpFlag = HelpFlag
-				}
-
-				tracef("appending HelpFlag (cmd=%[1]q)", cmd.Name)
-				cmd.appendFlag(localHelpFlag)
-				cmd.globaHelpFlagAdded = true
-			} else {
-				tracef("HelpFlag already added, skip (cmd=%[1]q)", cmd.Name)
-			}
-		}
+	if cmd.hideHelp() {
+		return
 	}
+
+	helpCommand := buildHelpCommand(true)
+	if cmd.Command(helpCommand.Name) == nil && !cmd.hideHelpCommand() {
+		tracef("appending helpCommand (cmd=%[1]q)", cmd.Name)
+		cmd.appendCommand(helpCommand)
+	}
+
+	cmd.ensureHelpFlag()
+}
+
+func (cmd *Command) ensureHelpFlag() {
+	if HelpFlag == nil {
+		return
+	}
+
+	if cmd.globaHelpFlagAdded {
+		tracef("HelpFlag already added, skip (cmd=%[1]q)", cmd.Name)
+		return
+	}
+
+	localHelpFlag := HelpFlag
+	if globalHelpFlag, ok := HelpFlag.(*BoolFlag); ok {
+		flag := *globalHelpFlag
+		localHelpFlag = &flag
+	}
+
+	tracef("appending HelpFlag (cmd=%[1]q)", cmd.Name)
+	cmd.appendFlag(localHelpFlag)
+	cmd.globaHelpFlagAdded = true
 }
 
 // dropClashingAliases removes aliases from `aliases` that are already
