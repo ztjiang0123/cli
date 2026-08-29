@@ -53,12 +53,17 @@ type errRequiredFlags struct {
 	missingFlags []string
 }
 
-func (e *errRequiredFlags) Error() string {
-	if len(e.missingFlags) == 1 {
-		return fmt.Sprintf("Required flag %q not set", e.missingFlags[0])
+// formatRequiredNotSet builds a "Required <noun> %q not set" message,
+// pluralizing the noun and joining the names when more than one is missing.
+func formatRequiredNotSet(noun string, missing []string) string {
+	if len(missing) == 1 {
+		return fmt.Sprintf("Required %s %q not set", noun, missing[0])
 	}
-	joinedMissingFlags := strings.Join(e.missingFlags, ", ")
-	return fmt.Sprintf("Required flags %q not set", joinedMissingFlags)
+	return fmt.Sprintf("Required %ss %q not set", noun, strings.Join(missing, ", "))
+}
+
+func (e *errRequiredFlags) Error() string {
+	return formatRequiredNotSet("flag", e.missingFlags)
 }
 
 type requiredArgumentsErr interface {
@@ -70,11 +75,7 @@ type errRequiredArguments struct {
 }
 
 func (e *errRequiredArguments) Error() string {
-	if len(e.missingArguments) == 1 {
-		return fmt.Sprintf("Required argument %q not set", e.missingArguments[0])
-	}
-	joinedMissingArguments := strings.Join(e.missingArguments, ", ")
-	return fmt.Sprintf("Required arguments %q not set", joinedMissingArguments)
+	return formatRequiredNotSet("argument", e.missingArguments)
 }
 
 type mutuallyExclusiveGroup struct {

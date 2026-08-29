@@ -55,11 +55,5 @@ func (f *genericValue) IsBoolFlag() bool {
 // Generic looks up the value of a local GenericFlag, returns
 // nil if not found
 func (cmd *Command) Generic(name string) Value {
-	if v, ok := cmd.Value(name).(Value); ok {
-		tracef("generic available for flag name %[1]q with value=%[2]v (cmd=%[3]q)", name, v, cmd.Name)
-		return v
-	}
-
-	tracef("generic NOT available for flag name %[1]q (cmd=%[2]q)", name, cmd.Name)
-	return nil
+	return getFlagValue[Value](cmd, name)
 }
