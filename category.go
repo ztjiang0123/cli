@@ -102,35 +102,41 @@ func newFlagCategoriesFromFlags(fs []Flag) FlagCategories {
 	fc := newFlagCategories()
 
 	var categorized bool
-
 	for _, fl := range fs {
-		if cf, ok := fl.(CategorizableFlag); ok {
-			visible := false
-			if vf, ok := fl.(VisibleFlag); ok {
-				visible = vf.IsVisible()
-			}
-			if cat := cf.GetCategory(); cat != "" && visible {
-				fc.AddFlag(cat, fl)
-				categorized = true
-			}
+		cat, visible := flagCategory(fl)
+		if cat != "" && visible {
+			fc.AddFlag(cat, fl)
+			categorized = true
 		}
 	}
 
-	if categorized {
-		for _, fl := range fs {
-			if cf, ok := fl.(CategorizableFlag); ok {
-				visible := false
-				if vf, ok := fl.(VisibleFlag); ok {
-					visible = vf.IsVisible()
-				}
-				if cf.GetCategory() == "" && visible {
-					fc.AddFlag("", fl)
-				}
-			}
+	if !categorized {
+		return fc
+	}
+
+	// Once at least one flag is categorized, uncategorized visible flags are
+	// collected under the empty category so they remain reachable.
+	for _, fl := range fs {
+		cat, visible := flagCategory(fl)
+		if cat == "" && visible {
+			fc.AddFlag("", fl)
 		}
 	}
 
 	return fc
+}
+
+// flagCategory reports the category name of fl and whether it is visible. A
+// flag that is not categorizable yields an empty category and is not visible.
+func flagCategory(fl Flag) (category string, visible bool) {
+	cf, ok := fl.(CategorizableFlag)
+	if !ok {
+		return "", false
+	}
+	if vf, ok := fl.(VisibleFlag); ok {
+		visible = vf.IsVisible()
+	}
+	return cf.GetCategory(), visible
 }
 
 func (f *defaultFlagCategories) AddFlag(category string, fl Flag) {

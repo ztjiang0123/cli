@@ -190,11 +190,18 @@ func handleMultiError(multiErr MultiError) int {
 		if multiErr2, ok := merr.(MultiError); ok {
 			code = handleMultiError(multiErr2)
 		} else if merr != nil {
-			fmt.Fprintln(ErrWriter, merr)
-			if exitErr, ok := merr.(ExitCoder); ok {
-				code = exitErr.ExitCode()
-			}
+			code = reportError(merr, code)
 		}
 	}
 	return code
+}
+
+// reportError prints a single error to ErrWriter and returns the exit code to
+// use, preserving prevCode when the error does not carry its own exit code.
+func reportError(err error, prevCode int) int {
+	fmt.Fprintln(ErrWriter, err)
+	if exitErr, ok := err.(ExitCoder); ok {
+		return exitErr.ExitCode()
+	}
+	return prevCode
 }
