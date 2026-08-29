@@ -129,30 +129,35 @@ func (f *FlagBase[T, C, V]) TypeName() string {
 func (f *FlagBase[T, C, V]) PostParse() error {
 	tracef("postparse (flag=%[1]q)", f.Name)
 
-	if !f.hasBeenSet {
-		if val, source, found := f.Sources.LookupWithSource(); found {
-			// reflect.TypeOf yields nil when T is an interface type (e.g.
-			// GenericFlag) and the value is nil, so the kind has to be
-			// derived defensively.
-			kind := reflect.Invalid
-			if ty := reflect.TypeOf(f.Value); ty != nil {
-				kind = ty.Kind()
-			}
-
-			if val != "" || kind == reflect.String {
-				if err := f.Set(f.Name, val); err != nil {
-					return fmt.Errorf(
-						"could not parse %[1]q as %[2]T value from %[3]s for flag %[4]s: %[5]s",
-						val, f.Value, source, f.Name, err,
-					)
-				}
-			} else if val == "" && kind == reflect.Bool {
-				_ = f.Set(f.Name, "false")
-			}
-
-			f.hasBeenSet = true
-		}
+	if f.hasBeenSet {
+		return nil
 	}
+
+	val, source, found := f.Sources.LookupWithSource()
+	if !found {
+		return nil
+	}
+
+	// reflect.TypeOf yields nil when T is an interface type (e.g.
+	// GenericFlag) and the value is nil, so the kind has to be
+	// derived defensively.
+	kind := reflect.Invalid
+	if ty := reflect.TypeOf(f.Value); ty != nil {
+		kind = ty.Kind()
+	}
+
+	if val != "" || kind == reflect.String {
+		if err := f.Set(f.Name, val); err != nil {
+			return fmt.Errorf(
+				"could not parse %[1]q as %[2]T value from %[3]s for flag %[4]s: %[5]s",
+				val, f.Value, source, f.Name, err,
+			)
+		}
+	} else if val == "" && kind == reflect.Bool {
+		_ = f.Set(f.Name, "false")
+	}
+
+	f.hasBeenSet = true
 
 	return nil
 }
