@@ -414,23 +414,29 @@ func (cmd *Command) showHelpForError() {
 func (cmd *Command) checkMutuallyExclusiveFlags(ctx context.Context) (context.Context, error) {
 	for pCmd := cmd; pCmd != nil; pCmd = pCmd.parent {
 		for _, grp := range pCmd.MutuallyExclusiveFlags {
-			err := grp.check(cmd)
-			if err == nil {
-				continue
+			if err := grp.check(cmd); err != nil {
+				return ctx, cmd.handleMutuallyExclusiveError(ctx, err)
 			}
-			if cmd.OnUsageError != nil {
-				return ctx, cmd.OnUsageError(ctx, cmd, err, cmd.parent != nil)
-			}
-			fmt.Fprintf(cmd.Root().ErrWriter, "Incorrect Usage: %s\n\n", err.Error())
-			if cmd.parent == nil {
-				_ = ShowRootCommandHelp(cmd)
-			} else if helpErr := ShowCommandHelp(ctx, cmd.parent, cmd.Name); helpErr != nil {
-				_ = ShowSubcommandHelp(cmd)
-			}
-			return ctx, err
 		}
 	}
 	return ctx, nil
+}
+
+// handleMutuallyExclusiveError renders the usage output for a mutually
+// exclusive flag violation and returns the error to surface (which may have
+// been transformed by a configured OnUsageError handler).
+func (cmd *Command) handleMutuallyExclusiveError(ctx context.Context, err error) error {
+	if cmd.OnUsageError != nil {
+		return cmd.OnUsageError(ctx, cmd, err, cmd.parent != nil)
+	}
+
+	fmt.Fprintf(cmd.Root().ErrWriter, "Incorrect Usage: %s\n\n", err.Error())
+	if cmd.parent == nil {
+		_ = ShowRootCommandHelp(cmd)
+	} else if helpErr := ShowCommandHelp(ctx, cmd.parent, cmd.Name); helpErr != nil {
+		_ = ShowSubcommandHelp(cmd)
+	}
+	return err
 }
 
 // resolveSubCommand selects the sub-command to dispatch to based on the parsed
