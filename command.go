@@ -257,13 +257,8 @@ func (cmd *Command) HasName(name string) bool {
 func (cmd *Command) VisibleCategories() []CommandCategory {
 	ret := []CommandCategory{}
 	for _, category := range cmd.categories.Categories() {
-		if visible := func() CommandCategory {
-			if len(category.VisibleCommands()) > 0 {
-				return category
-			}
-			return nil
-		}(); visible != nil {
-			ret = append(ret, visible)
+		if len(category.VisibleCommands()) > 0 {
+			ret = append(ret, category)
 		}
 	}
 	return ret
