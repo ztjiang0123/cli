@@ -20,16 +20,18 @@ func prefixFor(name string) (prefix string) {
 // Returns the placeholder, if any, and the unquoted usage string.
 func unquoteUsage(usage string) (string, string) {
 	for i := 0; i < len(usage); i++ {
-		if usage[i] == '`' {
-			for j := i + 1; j < len(usage); j++ {
-				if usage[j] == '`' {
-					name := usage[i+1 : j]
-					usage = usage[:i] + name + usage[j+1:]
-					return name, usage
-				}
-			}
-			break
+		if usage[i] != '`' {
+			continue
 		}
+		for j := i + 1; j < len(usage); j++ {
+			if usage[j] != '`' {
+				continue
+			}
+			name := usage[i+1 : j]
+			usage = usage[:i] + name + usage[j+1:]
+			return name, usage
+		}
+		break
 	}
 	return "", usage
 }
@@ -85,6 +87,25 @@ func formatDefault(format string) string {
 	return " (default: " + format + ")"
 }
 
+// defaultValueString returns the formatted "(default: ...)" text for a flag,
+// or an empty string when no default should be shown.
+func defaultValueString(f Flag, df DocGenerationFlag) string {
+	// don't print default text for required flags
+	if rf, ok := f.(RequiredFlag); ok && rf.IsRequired() {
+		return ""
+	}
+	if !df.IsDefaultVisible() {
+		return ""
+	}
+	if s := df.GetDefaultText(); s != "" {
+		return fmt.Sprintf(formatDefault("%s"), s)
+	}
+	if df.TakesValue() && df.GetValue() != "" {
+		return fmt.Sprintf(formatDefault("%s"), df.GetValue())
+	}
+	return ""
+}
+
 func stringifyFlag(f Flag) string {
 	// enforce DocGeneration interface on flags to avoid reflection
 	df, ok := f.(DocGenerationFlag)
@@ -103,20 +124,7 @@ func stringifyFlag(f Flag) string {
 		}
 	}
 
-	defaultValueString := ""
-
-	// don't print default text for required flags
-	if rf, ok := f.(RequiredFlag); !ok || !rf.IsRequired() {
-		if df.IsDefaultVisible() {
-			if s := df.GetDefaultText(); s != "" {
-				defaultValueString = fmt.Sprintf(formatDefault("%s"), s)
-			} else if df.TakesValue() && df.GetValue() != "" {
-				defaultValueString = fmt.Sprintf(formatDefault("%s"), df.GetValue())
-			}
-		}
-	}
-
-	usageWithDefault := strings.TrimSpace(usage + defaultValueString)
+	usageWithDefault := strings.TrimSpace(usage + defaultValueString(f, df))
 
 	pn := prefixedNames(f.Names(), placeholder)
 	sliceFlag, ok := f.(DocGenerationMultiValueFlag)
