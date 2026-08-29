@@ -49,6 +49,16 @@ func (s *flagParseState) result() Args {
 	return &stringSliceArgs{s.posArgs}
 }
 
+// parsedFlag describes a single flag token after its leading dashes have been
+// stripped and any inline "=value" has been split out. raw is the original
+// token (including dashes) used for error messages.
+type parsedFlag struct {
+	raw          string
+	name         string
+	value        string
+	valFromEqual bool
+}
+
 func (cmd *Command) parseFlags(args Args) (Args, error) {
 	tracef("parsing flags from arguments %[1]q (cmd=%[2]q)", args, cmd.Name)
 
@@ -183,33 +193,34 @@ func (cmd *Command) parseFlagToken(state *flagParseState) (flagParseAction, erro
 
 	tracef("parseFlags (shortOptionHandling=%[1]q)", shortOptionHandling)
 
-	flagName, flagVal, valFromEqual := splitFlagNameValue(firstArg[numMinuses:])
+	pf := splitFlagNameValue(firstArg, firstArg[numMinuses:])
 
-	tracef("flagName:2 (fName=%[1]q) (fVal=%[2]q)", flagName, flagVal)
+	tracef("flagName:2 (fName=%[1]q) (fVal=%[2]q)", pf.name, pf.value)
 
-	if f := cmd.lookupAppliedFlag(flagName); f != nil {
-		return cmd.applyAppliedFlag(state, f, firstArg, flagName, flagVal, valFromEqual)
+	if f := cmd.lookupAppliedFlag(pf.name); f != nil {
+		return cmd.applyAppliedFlag(state, f, pf)
 	}
 
 	// no flag lookup found and short handling is disabled
 	if !shortOptionHandling {
-		return cmd.handleUnknownLongFlag(state, flagName)
+		return cmd.handleUnknownLongFlag(state, pf.name)
 	}
 
-	return cmd.splitShortFlags(state, flagName, flagVal)
+	return cmd.splitShortFlags(state, pf.name, pf.value)
 }
 
-// splitFlagNameValue splits a flag token (with leading dashes already removed)
-// into its name and, when present, an "=value" suffix.
-func splitFlagNameValue(token string) (name, value string, valFromEqual bool) {
-	name = token
-	tracef("flagName:1 (fName=%[1]q)", name)
-	if index := strings.Index(name, "="); index != -1 {
-		value = name[index+1:]
-		name = name[:index]
-		valFromEqual = true
+// splitFlagNameValue splits a flag token into a parsedFlag. raw is the original
+// token (with leading dashes); token is the same value with leading dashes
+// removed, from which the name and any inline "=value" are taken.
+func splitFlagNameValue(raw, token string) parsedFlag {
+	pf := parsedFlag{raw: raw, name: token}
+	tracef("flagName:1 (fName=%[1]q)", pf.name)
+	if index := strings.Index(pf.name, "="); index != -1 {
+		pf.value = pf.name[index+1:]
+		pf.name = pf.name[:index]
+		pf.valFromEqual = true
 	}
-	return name, value, valFromEqual
+	return pf
 }
 
 // parsePositionalArg records a positional (non-flag) argument, or hands the
@@ -231,7 +242,9 @@ func (cmd *Command) parsePositionalArg(state *flagParseState, firstArg string) f
 
 // applyAppliedFlag sets an already-known flag f, consuming a following argument
 // as its value when required.
-func (cmd *Command) applyAppliedFlag(state *flagParseState, f Flag, firstArg, flagName, flagVal string, valFromEqual bool) (flagParseAction, error) {
+func (cmd *Command) applyAppliedFlag(state *flagParseState, f Flag, pf parsedFlag) (flagParseAction, error) {
+	flagName, flagVal := pf.name, pf.value
+
 	tracef("Trying flag type (fName=%[1]q) (type=%[2]T)", flagName, f)
 	if fb, ok := f.(boolFlag); ok && fb.IsBoolFlag() {
 		if flagVal == "" {
@@ -246,7 +259,7 @@ func (cmd *Command) applyAppliedFlag(state *flagParseState, f Flag, firstArg, fl
 
 	tracef("processing non bool flag (fName=%[1]q)", flagName)
 	// not a bool flag so need to get the next arg
-	if flagVal == "" && !valFromEqual {
+	if flagVal == "" && !pf.valFromEqual {
 		if len(state.rargs) == 1 {
 			// In shell completion mode, preserve the flag so that DefaultCompleteWithFlags can use it
 			// as lastArg and offer suggestions for it.
@@ -254,7 +267,7 @@ func (cmd *Command) applyAppliedFlag(state *flagParseState, f Flag, firstArg, fl
 				state.posArgs = append(state.posArgs, state.rargs...)
 				return flagParseDone, nil
 			}
-			return flagParseNext, fmt.Errorf("%s%s", argumentNotProvidedErrMsg, firstArg)
+			return flagParseNext, fmt.Errorf("%s%s", argumentNotProvidedErrMsg, pf.raw)
 		}
 		flagVal = state.rargs[1]
 		state.rargs = state.rargs[1:]
