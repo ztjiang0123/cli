@@ -2,7 +2,6 @@ package cli
 
 import (
 	"strconv"
-	"unsafe"
 )
 
 type (
@@ -43,23 +42,13 @@ func (i intValue[T]) ToString(b T) string {
 // Below functions are to satisfy the flag.Value interface
 
 func (i *intValue[T]) Set(s string) error {
-	v, err := strconv.ParseInt(s, i.base, int(unsafe.Sizeof(T(0))*8))
-	if err != nil {
-		return err
-	}
-	*i.val = T(v)
-	return err
+	return setIntegerValue(i.val, i.base, s, strconv.ParseInt)
 }
 
 func (i *intValue[T]) Get() any { return *i.val }
 
 func (i *intValue[T]) String() string {
-	base := i.base
-	if base == 0 {
-		base = 10
-	}
-
-	return strconv.FormatInt(int64(*i.val), base)
+	return formatIntegerValue(*i.val, i.base, strconv.FormatInt)
 }
 
 // Int looks up the value of a local Int64Flag, returns

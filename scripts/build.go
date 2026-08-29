@@ -296,126 +296,19 @@ func testCleanup(packages []string) error {
 func GfmrunActionFunc(ctx context.Context, cmd *cli.Command) error {
 	docsDir := filepath.Join(cmd.String("top-dir"), "docs")
 
-	bash, err := exec.LookPath("bash")
+	tmpDir, err := setupGfmrunWorkspace(ctx, cmd, docsDir)
 	if err != nil {
 		return err
 	}
 
-	os.Setenv("SHELL", bash)
-
-	tmpDir, err := os.MkdirTemp("", "urfave-cli*")
+	sources, err := gfmrunSources(cmd.Args().Get(0), cmd.Bool("walk"))
 	if err != nil {
 		return err
 	}
 
-	wd, err := os.Getwd()
+	counter, err := countRunnableExamples(sources)
 	if err != nil {
 		return err
-	}
-
-	if err := os.Chdir(tmpDir); err != nil {
-		return err
-	}
-
-	fmt.Fprintf(cmd.ErrWriter, "# ---> workspace/TMPDIR is %q\n", tmpDir)
-
-	if err := runCmd(ctx, "go", "work", "init", docsDir); err != nil {
-		return err
-	}
-
-	os.Setenv("TMPDIR", tmpDir)
-
-	if err := os.Chdir(wd); err != nil {
-		return err
-	}
-
-	dirPath := cmd.Args().Get(0)
-	if dirPath == "" {
-		dirPath = "README.md"
-	}
-
-	walk := cmd.Bool("walk")
-	sources := []string{}
-
-	if walk {
-		// Walk the directory and find all markdown files.
-		err := filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
-			if err != nil {
-				return err
-			}
-
-			if info.IsDir() {
-				return nil
-			}
-
-			if filepath.Ext(path) != ".md" {
-				return nil
-			}
-
-			sources = append(sources, path)
-			return nil
-		})
-		if err != nil {
-			return err
-		}
-	} else {
-		sources = append(sources, dirPath)
-	}
-
-	var counter int
-	inGoBlock := false
-	goHasPkgMain := false
-	fenceRe := regexp.MustCompile("^(`{3,}|~{3,})")
-
-	for _, src := range sources {
-		file, err := os.Open(src)
-		if err != nil {
-			return err
-		}
-		defer file.Close()
-
-		scanner := bufio.NewScanner(file)
-		for scanner.Scan() {
-			line := scanner.Text()
-			fenceMatch := fenceRe.FindString(line)
-			if fenceMatch == "" {
-				if inGoBlock && strings.HasPrefix(line, "package main") {
-					goHasPkgMain = true
-				}
-				continue
-			}
-
-			lang := strings.TrimSpace(line[len(fenceMatch):])
-
-			if inGoBlock {
-				if goHasPkgMain {
-					counter++
-				}
-				inGoBlock = false
-				goHasPkgMain = false
-				continue
-			}
-
-			switch lang {
-			case "go":
-				inGoBlock = true
-				goHasPkgMain = false
-			case "sh":
-				counter++
-			case "bash":
-				counter++
-			}
-		}
-
-		err = file.Close()
-		if err != nil {
-			return err
-		}
-
-		err = scanner.Err()
-		if err != nil {
-			return err
-		}
 	}
 
 	gfmArgs := []string{
@@ -431,6 +324,151 @@ func GfmrunActionFunc(ctx context.Context, cmd *cli.Command) error {
 	}
 
 	return os.RemoveAll(tmpDir)
+}
+
+// setupGfmrunWorkspace prepares the temporary go workspace used by gfmrun and
+// returns its path. The SHELL and TMPDIR environment variables are pointed at
+// bash and the temporary directory respectively.
+func setupGfmrunWorkspace(ctx context.Context, cmd *cli.Command, docsDir string) (string, error) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		return "", err
+	}
+	os.Setenv("SHELL", bash)
+
+	tmpDir, err := os.MkdirTemp("", "urfave-cli*")
+	if err != nil {
+		return "", err
+	}
+
+	wd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+
+	if err := os.Chdir(tmpDir); err != nil {
+		return "", err
+	}
+
+	fmt.Fprintf(cmd.ErrWriter, "# ---> workspace/TMPDIR is %q\n", tmpDir)
+
+	if err := runCmd(ctx, "go", "work", "init", docsDir); err != nil {
+		return "", err
+	}
+
+	os.Setenv("TMPDIR", tmpDir)
+
+	if err := os.Chdir(wd); err != nil {
+		return "", err
+	}
+
+	return tmpDir, nil
+}
+
+// gfmrunSources returns the list of markdown files to hand to gfmrun. When
+// walk is false the single dirPath (defaulting to README.md) is returned;
+// otherwise dirPath is walked recursively for all .md files.
+func gfmrunSources(dirPath string, walk bool) ([]string, error) {
+	if dirPath == "" {
+		dirPath = "README.md"
+	}
+
+	if !walk {
+		return []string{dirPath}, nil
+	}
+
+	// Walk the directory and find all markdown files.
+	sources := []string{}
+	err := filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if info.IsDir() || filepath.Ext(path) != ".md" {
+			return nil
+		}
+
+		sources = append(sources, path)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return sources, nil
+}
+
+// countRunnableExamples counts the runnable code examples (go programs with a
+// main package, plus sh/bash blocks) across every source file.
+func countRunnableExamples(sources []string) (int, error) {
+	fenceRe := regexp.MustCompile("^(`{3,}|~{3,})")
+
+	var counter int
+	for _, src := range sources {
+		n, err := countRunnableExamplesInFile(src, fenceRe)
+		if err != nil {
+			return 0, err
+		}
+		counter += n
+	}
+
+	return counter, nil
+}
+
+// countRunnableExamplesInFile counts the runnable code examples in a single
+// markdown file, delimited by fenced code blocks matching fenceRe.
+func countRunnableExamplesInFile(src string, fenceRe *regexp.Regexp) (int, error) {
+	file, err := os.Open(src)
+	if err != nil {
+		return 0, err
+	}
+	defer file.Close()
+
+	var counter int
+	inGoBlock := false
+	goHasPkgMain := false
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		fenceMatch := fenceRe.FindString(line)
+
+		// A non-fence line only matters when it opens the main package of
+		// an in-progress go block.
+		if fenceMatch == "" {
+			if inGoBlock && strings.HasPrefix(line, "package main") {
+				goHasPkgMain = true
+			}
+			continue
+		}
+
+		// A fence while inside a go block closes it; count the example only
+		// if it declared package main.
+		if inGoBlock {
+			if goHasPkgMain {
+				counter++
+			}
+			inGoBlock = false
+			goHasPkgMain = false
+			continue
+		}
+
+		// Otherwise the fence opens a new block; runnable shell blocks count
+		// immediately, go blocks are counted when they close.
+		switch strings.TrimSpace(line[len(fenceMatch):]) {
+		case "go":
+			inGoBlock = true
+			goHasPkgMain = false
+		case "sh", "bash":
+			counter++
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return 0, err
+	}
+
+	return counter, nil
 }
 
 // checkBinarySizeActionFunc checks the size of an example binary to ensure that we are keeping size down
