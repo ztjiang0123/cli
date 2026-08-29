@@ -45,6 +45,56 @@ func (cmd *Command) setupDefaults(osArgs []string) {
 		cmd.Action = helpCommandAction
 	}
 
+	cmd.setupDefaultIO()
+
+	if cmd.AllowExtFlags {
+		tracef("visiting all flags given AllowExtFlags=true (cmd=%[1]q)", cmd.Name)
+		// add global flags added by other packages
+		flag.VisitAll(func(f *flag.Flag) {
+			// skip test flags
+			if !strings.HasPrefix(f.Name, ignoreFlagPrefix) {
+				cmd.Flags = append(cmd.Flags, &extFlag{f})
+			}
+		})
+	}
+
+	for _, subCmd := range cmd.Commands {
+		tracef("setting sub-command (cmd=%[1]q) parent as self (cmd=%[2]q)", subCmd.Name, cmd.Name)
+		subCmd.parent = cmd
+	}
+
+	cmd.ensureHelp()
+
+	if !cmd.HideVersion && isRoot {
+		cmd.appendVersionFlag()
+	}
+
+	if cmd.PrefixMatchCommands && cmd.SuggestCommandFunc == nil {
+		tracef("setting default SuggestCommandFunc (cmd=%[1]q)", cmd.Name)
+		cmd.SuggestCommandFunc = suggestCommand
+	}
+
+	if isRoot && cmd.EnableShellCompletion || cmd.ConfigureShellCompletionCommand != nil {
+		cmd.appendCompletionCommand()
+	}
+
+	cmd.setupCategories()
+
+	tracef("setting flag categories (cmd=%[1]q)", cmd.Name)
+	cmd.flagCategories = newFlagCategoriesFromFlags(cmd.allFlags())
+
+	if cmd.Metadata == nil {
+		tracef("setting default Metadata (cmd=%[1]q)", cmd.Name)
+		cmd.Metadata = map[string]any{}
+	}
+
+	cmd.setFlags = map[Flag]struct{}{}
+}
+
+// setupDefaultIO fills in the Reader, Writer and ErrWriter streams, inheriting
+// from the parent command when available and falling back to the process
+// standard streams otherwise.
+func (cmd *Command) setupDefaultIO() {
 	if cmd.Reader == nil {
 		if cmd.parent != nil && cmd.parent.Reader != nil {
 			tracef("inheriting Reader from parent (cmd=%[1]q)", cmd.Name)
@@ -74,72 +124,59 @@ func (cmd *Command) setupDefaults(osArgs []string) {
 			cmd.ErrWriter = os.Stderr
 		}
 	}
+}
 
-	if cmd.AllowExtFlags {
-		tracef("visiting all flags given AllowExtFlags=true (cmd=%[1]q)", cmd.Name)
-		// add global flags added by other packages
-		flag.VisitAll(func(f *flag.Flag) {
-			// skip test flags
-			if !strings.HasPrefix(f.Name, ignoreFlagPrefix) {
-				cmd.Flags = append(cmd.Flags, &extFlag{f})
-			}
-		})
+// appendVersionFlag adds the version flag to the root command unless it has
+// already been added or its names are already claimed by user flags.
+func (cmd *Command) appendVersionFlag() {
+	tracef("appending version flag (cmd=%[1]q)", cmd.Name)
+	if cmd.globaVersionFlagAdded {
+		return
 	}
 
-	for _, subCmd := range cmd.Commands {
-		tracef("setting sub-command (cmd=%[1]q) parent as self (cmd=%[2]q)", subCmd.Name, cmd.Name)
-		subCmd.parent = cmd
+	var localVersionFlag Flag
+	if globalVersionFlag, ok := VersionFlag.(*BoolFlag); ok {
+		flag := *globalVersionFlag
+		// Drop any alias a user flag already claims (e.g. -v
+		// for --verbose) so the user flag wins but --version
+		// still works. See #2229.
+		flag.Aliases = dropClashingAliases(flag.Aliases, cmd.allFlags(), flag.Name)
+		localVersionFlag = &flag
+	} else {
+		localVersionFlag = VersionFlag
 	}
 
-	cmd.ensureHelp()
+	if !flagNamesInUse(cmd.allFlags(), localVersionFlag.Names()) {
+		cmd.appendFlag(localVersionFlag)
+		cmd.versionFlag = localVersionFlag
+		cmd.globaVersionFlagAdded = true
+	}
+}
 
-	if !cmd.HideVersion && isRoot {
-		tracef("appending version flag (cmd=%[1]q)", cmd.Name)
-		if !cmd.globaVersionFlagAdded {
-			var localVersionFlag Flag
-			if globalVersionFlag, ok := VersionFlag.(*BoolFlag); ok {
-				flag := *globalVersionFlag
-				// Drop any alias a user flag already claims (e.g. -v
-				// for --verbose) so the user flag wins but --version
-				// still works. See #2229.
-				flag.Aliases = dropClashingAliases(flag.Aliases, cmd.allFlags(), flag.Name)
-				localVersionFlag = &flag
-			} else {
-				localVersionFlag = VersionFlag
-			}
+// appendCompletionCommand builds and appends the shell completion command,
+// honoring a custom command name and optional configuration hook.
+func (cmd *Command) appendCompletionCommand() {
+	completionCommand := buildCompletionCommand(cmd.Name)
 
-			if !flagNamesInUse(cmd.allFlags(), localVersionFlag.Names()) {
-				cmd.appendFlag(localVersionFlag)
-				cmd.versionFlag = localVersionFlag
-				cmd.globaVersionFlagAdded = true
-			}
-		}
+	if cmd.ShellCompletionCommandName != "" {
+		tracef(
+			"setting completion command name (%[1]q) from "+
+				"cmd.ShellCompletionCommandName (cmd=%[2]q)",
+			cmd.ShellCompletionCommandName, cmd.Name,
+		)
+		completionCommand.Name = cmd.ShellCompletionCommandName
 	}
 
-	if cmd.PrefixMatchCommands && cmd.SuggestCommandFunc == nil {
-		tracef("setting default SuggestCommandFunc (cmd=%[1]q)", cmd.Name)
-		cmd.SuggestCommandFunc = suggestCommand
+	tracef("appending completionCommand (cmd=%[1]q)", cmd.Name)
+	cmd.appendCommand(completionCommand)
+	if cmd.ConfigureShellCompletionCommand != nil {
+		cmd.ConfigureShellCompletionCommand(completionCommand)
 	}
+}
 
-	if isRoot && cmd.EnableShellCompletion || cmd.ConfigureShellCompletionCommand != nil {
-		completionCommand := buildCompletionCommand(cmd.Name)
-
-		if cmd.ShellCompletionCommandName != "" {
-			tracef(
-				"setting completion command name (%[1]q) from "+
-					"cmd.ShellCompletionCommandName (cmd=%[2]q)",
-				cmd.ShellCompletionCommandName, cmd.Name,
-			)
-			completionCommand.Name = cmd.ShellCompletionCommandName
-		}
-
-		tracef("appending completionCommand (cmd=%[1]q)", cmd.Name)
-		cmd.appendCommand(completionCommand)
-		if cmd.ConfigureShellCompletionCommand != nil {
-			cmd.ConfigureShellCompletionCommand(completionCommand)
-		}
-	}
-
+// setupCategories builds the command categories from the sub-commands, sorts
+// them, and propagates categories onto mutually exclusive flag groups.
+func (cmd *Command) setupCategories() {
 	tracef("setting command categories (cmd=%[1]q)", cmd.Name)
 	cmd.categories = newCommandCategories()
 
@@ -154,16 +191,6 @@ func (cmd *Command) setupDefaults(osArgs []string) {
 	for _, grp := range cmd.MutuallyExclusiveFlags {
 		grp.propagateCategory()
 	}
-
-	tracef("setting flag categories (cmd=%[1]q)", cmd.Name)
-	cmd.flagCategories = newFlagCategoriesFromFlags(cmd.allFlags())
-
-	if cmd.Metadata == nil {
-		tracef("setting default Metadata (cmd=%[1]q)", cmd.Name)
-		cmd.Metadata = map[string]any{}
-	}
-
-	cmd.setFlags = map[Flag]struct{}{}
 }
 
 func (cmd *Command) setupCommandGraph() {
@@ -183,20 +210,7 @@ func (cmd *Command) setupSubcommand() {
 
 	cmd.ensureHelp()
 
-	tracef("setting command categories (cmd=%[1]q)", cmd.Name)
-	cmd.categories = newCommandCategories()
-
-	for _, subCmd := range cmd.Commands {
-		cmd.categories.AddCommand(subCmd.Category, subCmd)
-	}
-
-	tracef("sorting command categories (cmd=%[1]q)", cmd.Name)
-	sort.Sort(cmd.categories.(*commandCategories))
-
-	tracef("setting category on mutually exclusive flags (cmd=%[1]q)", cmd.Name)
-	for _, grp := range cmd.MutuallyExclusiveFlags {
-		grp.propagateCategory()
-	}
+	cmd.setupCategories()
 
 	tracef("setting flag categories (cmd=%[1]q)", cmd.Name)
 	cmd.flagCategories = newFlagCategoriesFromFlags(cmd.allFlags())

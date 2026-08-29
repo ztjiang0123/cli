@@ -133,10 +133,17 @@ func EnvVar(key string) ValueSource {
 // EnvVars is a helper function to encapsulate a number of
 // envVarValueSource together as a ValueSourceChain
 func EnvVars(keys ...string) ValueSourceChain {
+	return newValueSourceChain(keys, EnvVar)
+}
+
+// newValueSourceChain builds a ValueSourceChain by applying make to each
+// item, allowing the various helper constructors (EnvVars, Files, ...) to
+// share a single implementation.
+func newValueSourceChain(items []string, make func(string) ValueSource) ValueSourceChain {
 	vsc := ValueSourceChain{Chain: []ValueSource{}}
 
-	for _, key := range keys {
-		vsc.Chain = append(vsc.Chain, EnvVar(key))
+	for _, item := range items {
+		vsc.Chain = append(vsc.Chain, make(item))
 	}
 
 	return vsc
@@ -164,13 +171,7 @@ func File(path string) ValueSource {
 // Files is a helper function to encapsulate a number of
 // fileValueSource together as a ValueSourceChain
 func Files(paths ...string) ValueSourceChain {
-	vsc := ValueSourceChain{Chain: []ValueSource{}}
-
-	for _, path := range paths {
-		vsc.Chain = append(vsc.Chain, File(path))
-	}
-
-	return vsc
+	return newValueSourceChain(paths, File)
 }
 
 type mapSource struct {
