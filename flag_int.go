@@ -19,19 +19,13 @@ type IntegerConfig struct {
 
 // -- int Value
 type intValue[T int | int8 | int16 | int32 | int64] struct {
-	val  *T
-	base int
+	integerValueBase[T]
 }
 
 // Below functions are to satisfy the ValueCreator interface
 
 func (i intValue[T]) Create(val T, p *T, c IntegerConfig) Value {
-	*p = val
-
-	return &intValue[T]{
-		val:  p,
-		base: c.Base,
-	}
+	return &intValue[T]{newIntegerValueBase(val, p, c)}
 }
 
 func (i intValue[T]) ToString(b T) string {
@@ -44,8 +38,6 @@ func (i intValue[T]) ToString(b T) string {
 func (i *intValue[T]) Set(s string) error {
 	return setIntegerValue(i.val, i.base, s, strconv.ParseInt)
 }
-
-func (i *intValue[T]) Get() any { return *i.val }
 
 func (i *intValue[T]) String() string {
 	return formatIntegerValue(*i.val, i.base, strconv.FormatInt)
@@ -82,12 +74,5 @@ func (cmd *Command) Int64(name string) int64 {
 }
 
 func getInt[T int | int8 | int16 | int32 | int64](cmd *Command, name string) T {
-	if v, ok := cmd.Value(name).(T); ok {
-		tracef("int available for flag name %[1]q with value=%[2]v (cmd=%[3]q)", name, v, cmd.Name)
-
-		return v
-	}
-
-	tracef("int NOT available for flag name %[1]q (cmd=%[2]q)", name, cmd.Name)
-	return 0
+	return getFlagValue[T](cmd, name)
 }

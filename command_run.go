@@ -11,81 +11,97 @@ import (
 
 type helpShownKey struct{}
 
+// stdinArgParser tokenizes the flags/arguments read from a command's stdin. It
+// is a small state machine that reads runes one at a time, splitting on
+// whitespace while honoring double-quoted strings.
+type stdinArgParser struct {
+	inString bool     // currently reading the body of a quoted string
+	token    string   // the token accumulated so far
+	args     []string // completed tokens
+}
+
+// flushToken appends the accumulated token to args (when non-empty) and resets
+// it. It reports whether a "--" terminator was flushed, which signals the
+// caller to stop parsing.
+func (p *stdinArgParser) flushToken() (terminated bool) {
+	if p.token == "" {
+		return false
+	}
+	if !p.inString && p.token == "--" {
+		return true
+	}
+	p.args = append(p.args, p.token)
+	p.token = ""
+	return false
+}
+
+// consume processes a single rune. It reports whether parsing should stop (a
+// "--" terminator was reached).
+func (p *stdinArgParser) consume(ch rune) (terminated bool) {
+	if p.inString {
+		if ch == '"' {
+			p.flushToken()
+			p.inString = false
+		} else {
+			p.token += string(ch)
+		}
+		return false
+	}
+
+	// Outside a quoted string, whitespace and quotes delimit tokens.
+	if unicode.IsSpace(ch) || ch == '"' {
+		if p.flushToken() {
+			return true
+		}
+		if ch == '"' {
+			p.inString = true
+		}
+		return false
+	}
+
+	p.token += string(ch)
+	return false
+}
+
+// finish handles the trailing token once EOF is reached.
+func (p *stdinArgParser) finish() {
+	if p.inString {
+		// An unterminated quoted string is kept only if it has content.
+		for _, t := range p.token {
+			if !unicode.IsSpace(t) {
+				p.args = append(p.args, p.token)
+				break
+			}
+		}
+		return
+	}
+
+	if p.token != "--" {
+		p.args = append(p.args, p.token)
+	}
+}
+
 func (cmd *Command) parseArgsFromStdin() ([]string, error) {
-	type state int
-	const (
-		stateSearchForToken  state = -1
-		stateSearchForString state = 0
-	)
-
-	st := stateSearchForToken
-	linenum := 1
-	token := ""
-	args := []string{}
-
+	p := &stdinArgParser{args: []string{}}
 	breader := bufio.NewReader(cmd.Reader)
 
-outer:
 	for {
 		ch, _, err := breader.ReadRune()
 		if err == io.EOF {
-			switch st {
-			case stateSearchForToken:
-				if token != "--" {
-					args = append(args, token)
-				}
-			case stateSearchForString:
-				// make sure string is not empty
-				for _, t := range token {
-					if !unicode.IsSpace(t) {
-						args = append(args, token)
-					}
-				}
-			}
-			break outer
+			p.finish()
+			break
 		}
 		if err != nil {
 			return nil, err
 		}
-		switch st {
-		case stateSearchForToken:
-			if unicode.IsSpace(ch) || ch == '"' {
-				if ch == '\n' {
-					linenum++
-				}
-				if token != "" {
-					// end the processing here
-					if token == "--" {
-						break outer
-					}
-					args = append(args, token)
-					token = ""
-				}
-				if ch == '"' {
-					st = stateSearchForString
-				}
-				continue
-			}
-			token += string(ch)
-		case stateSearchForString:
-			if ch != '"' {
-				token += string(ch)
-			} else {
-				if token != "" {
-					args = append(args, token)
-					token = ""
-				}
-				/*else {
-					//TODO. Should we pass in empty strings ?
-				}*/
-				st = stateSearchForToken
-			}
+		if p.consume(ch) {
+			break
 		}
 	}
 
-	tracef("parsed stdin args as %v (cmd=%[2]q)", args, cmd.Name)
+	tracef("parsed stdin args as %v (cmd=%[2]q)", p.args, cmd.Name)
 
-	return args, nil
+	return p.args, nil
 }
 
 // Run is the entry point to the command graph. The positional
@@ -111,24 +127,10 @@ func (cmd *Command) run(ctx context.Context, osArgs []string) (_ context.Context
 	}
 
 	if cmd.parent == nil {
-		if cmd.ReadArgsFromStdin {
-			if args, err := cmd.parseArgsFromStdin(); err != nil {
-				return ctx, err
-			} else {
-				osArgs = append(osArgs, args...)
-			}
+		var err error
+		if osArgs, err = cmd.setupRootArgs(osArgs); err != nil {
+			return ctx, err
 		}
-		// handle the completion flag separately from the flagset since
-		// completion could be attempted after a flag, but before its value was put
-		// on the command line. this causes the flagset to interpret the completion
-		// flag name as the value of the flag before it which is undesirable
-		// note that we can only do this because the shell autocomplete function
-		// always appends the completion flag at the end of the command
-		tracef("checking osArgs %v (cmd=%[2]q)", osArgs, cmd.Name)
-		cmd.shellCompletion, osArgs = checkShellCompleteFlag(cmd, osArgs)
-
-		tracef("setting cmd.shellCompletion=%[1]v from checkShellCompleteFlag (cmd=%[2]q)", cmd.shellCompletion && cmd.EnableShellCompletion, cmd.Name)
-		cmd.shellCompletion = cmd.EnableShellCompletion && cmd.shellCompletion
 	}
 
 	tracef("using post-checkShellCompleteFlag arguments %[1]q (cmd=%[2]q)", osArgs, cmd.Name)
@@ -143,13 +145,8 @@ func (cmd *Command) run(ctx context.Context, osArgs []string) (_ context.Context
 	var rargs Args = &stringSliceArgs{v: osArgs}
 	var args Args = &stringSliceArgs{rargs.Tail()}
 
-	for _, f := range cmd.allFlags() {
-		if cmd.hasPersistentFlagOnAncestor(f) {
-			continue
-		}
-		if err := f.PreParse(); err != nil {
-			return ctx, err
-		}
+	if err := cmd.preParseFlags(); err != nil {
+		return ctx, err
 	}
 
 	var err error
@@ -164,151 +161,39 @@ func (cmd *Command) run(ctx context.Context, osArgs []string) (_ context.Context
 	tracef("using post-parse arguments %[1]q (cmd=%[2]q)", args, cmd.Name)
 
 	if shouldRunCompletion(cmd) {
-		var beforeErr error
-		if ctx, beforeErr = runBefore(ctx, commandChain(cmd)); beforeErr != nil {
-			return ctx, beforeErr
-		}
-		runCompletion(ctx, cmd)
-		return ctx, nil
+		return cmd.runCompletionPhase(ctx)
 	}
 
 	if err != nil {
-		tracef("setting deferErr from %[1]q (cmd=%[2]q)", err, cmd.Name)
-		deferErr = err
-
-		cmd.isInError = true
-		if cmd.checkHelp() {
-			ctx = context.WithValue(ctx, helpShownKey{}, true)
-			if cmd.parent == nil {
-				_ = ShowRootCommandHelp(cmd)
-			} else {
-				_ = ShowSubcommandHelp(cmd)
-			}
-			return ctx, nil
-		}
-		if cmd.OnUsageError != nil {
-			err = cmd.OnUsageError(ctx, cmd, err, cmd.parent != nil)
-			err = cmd.handleExitCoder(ctx, err)
-			return ctx, err
-		}
-		fmt.Fprintf(cmd.Root().ErrWriter, "Incorrect Usage: %s\n\n", err.Error())
-		if cmd.Suggest {
-			if suggestion, err := cmd.suggestFlagFromError(err, ""); err == nil {
-				fmt.Fprintf(cmd.Root().ErrWriter, "%s", suggestion)
-			}
-		}
-		if !cmd.hideHelp() {
-			if cmd.parent == nil {
-				tracef("running ShowRootCommandHelp")
-				if err := ShowRootCommandHelp(cmd); err != nil {
-					tracef("SILENTLY IGNORING ERROR running ShowRootCommandHelp %[1]v (cmd=%[2]q)", err, cmd.Name)
-				}
-			} else {
-				tracef("running ShowSubcommandHelp for %[1]q", cmd.Name)
-				_ = ShowSubcommandHelp(cmd)
-			}
-		}
-
-		return ctx, err
+		return cmd.handleParseError(ctx, err)
 	}
 
 	if cmd.checkHelp() {
 		ctx = context.WithValue(ctx, helpShownKey{}, true)
 		return ctx, helpCommandAction(ctx, cmd)
-	} else {
-		tracef("no help is wanted (cmd=%[1]q)", cmd.Name)
 	}
+	tracef("no help is wanted (cmd=%[1]q)", cmd.Name)
 
 	if cmd.parent == nil && !cmd.HideVersion && checkVersion(cmd) {
 		ShowVersion(cmd)
 		return ctx, nil
 	}
 
-	for _, flag := range cmd.allFlags() {
-		cmd.setMultiValueParsingConfig(flag)
-		isSet := flag.IsSet()
-		if err := flag.PostParse(); err != nil {
-			return ctx, err
-		}
-		// add env set flags here
-		if !isSet && flag.IsSet() {
-			cmd.setFlags[flag] = struct{}{}
-		}
+	if err := cmd.postParseFlags(); err != nil {
+		return ctx, err
 	}
 
 	if cmd.After != nil && !cmd.Root().shellCompletion {
 		defer func() {
-			if ctx.Value(helpShownKey{}) != nil {
-				return
-			}
-			if err := cmd.After(ctx, cmd); err != nil {
-				err = cmd.handleExitCoder(ctx, err)
-
-				if deferErr != nil {
-					deferErr = newMultiError(deferErr, err)
-				} else {
-					deferErr = err
-				}
-			}
+			deferErr = cmd.runAfter(ctx, deferErr)
 		}()
 	}
 
-	// Walk the parent chain to check mutually exclusive flag groups
-	// defined on ancestor commands, since persistent flags are inherited.
-	for pCmd := cmd; pCmd != nil; pCmd = pCmd.parent {
-		for _, grp := range pCmd.MutuallyExclusiveFlags {
-			if err := grp.check(cmd); err != nil {
-				if cmd.OnUsageError != nil {
-					err = cmd.OnUsageError(ctx, cmd, err, cmd.parent != nil)
-				} else {
-					fmt.Fprintf(cmd.Root().ErrWriter, "Incorrect Usage: %s\n\n", err.Error())
-					if cmd.parent == nil {
-						_ = ShowRootCommandHelp(cmd)
-					} else {
-						if err := ShowCommandHelp(ctx, cmd.parent, cmd.Name); err != nil {
-							_ = ShowSubcommandHelp(cmd)
-						}
-					}
-				}
-				return ctx, err
-			}
-		}
+	if newCtx, err := cmd.checkMutuallyExclusiveFlags(ctx); err != nil {
+		return newCtx, err
 	}
 
-	var subCmd *Command
-	if cmd.parsedArgs.Present() {
-		tracef("checking positional args %[1]q (cmd=%[2]q)", cmd.parsedArgs, cmd.Name)
-
-		name := cmd.parsedArgs.First()
-
-		tracef("using first positional argument as sub-command name=%[1]q (cmd=%[2]q)", name, cmd.Name)
-
-		if cmd.SuggestCommandFunc != nil && name != "--" {
-			name = cmd.SuggestCommandFunc(cmd.Commands, name)
-			tracef("suggested command name=%1[q] (cmd=%[2]q)", name, cmd.Name)
-		}
-		subCmd = cmd.Command(name)
-		if subCmd == nil {
-			hasDefault := cmd.DefaultCommand != ""
-
-			if hasDefault {
-				tracef("using default command=%[1]q (cmd=%[2]q)", cmd.DefaultCommand, cmd.Name)
-			}
-
-			if hasDefault {
-				argsWithDefault := cmd.argsWithDefaultCommand(cmd.parsedArgs)
-				tracef("using default command args=%[1]q (cmd=%[2]q)", argsWithDefault, cmd.Name)
-				subCmd = cmd.Command(argsWithDefault.First())
-				cmd.parsedArgs = argsWithDefault
-			}
-		}
-	} else if cmd.DefaultCommand != "" {
-		tracef("no positional args present; checking default command %[1]q (cmd=%[2]q)", cmd.DefaultCommand, cmd.Name)
-
-		if dc := cmd.Command(cmd.DefaultCommand); dc != cmd {
-			subCmd = dc
-		}
-	}
+	subCmd := cmd.resolveSubCommand()
 
 	// If a subcommand has been resolved, let it handle the remaining execution.
 	if subCmd != nil {
@@ -321,75 +206,311 @@ func (cmd *Command) run(ctx context.Context, osArgs []string) (_ context.Context
 		return ctx, err
 	}
 
-	// This code path is the innermost command execution. Here we actually
-	// perform the command action.
-	//
-	// First, resolve the chain of nested commands up to the parent.
+	// This code path is the innermost command execution: run the leaf
+	// command's own action. executeCommand may advance ctx (via Before
+	// actions); assign it back so the deferred After call sees the same
+	// context.
+	ctx, deferErr = cmd.executeCommand(ctx)
+
+	tracef("returning deferErr (cmd=%[1]q) %[2]q", cmd.Name, deferErr)
+	return ctx, deferErr
+}
+
+// executeCommand runs the leaf command: ancestor ArgValidator, Before actions,
+// flag actions, required-flag/argument checks, positional argument parsing, and
+// finally the command's Action. It returns the (possibly advanced) context and
+// the error to surface as deferErr.
+func (cmd *Command) executeCommand(ctx context.Context) (context.Context, error) {
+	// Resolve the chain of nested commands up to the parent.
 	cmdChain := commandChain(cmd)
 
 	// Run ArgValidator from the nearest ancestor that sets one.
 	if validator := findArgValidator(cmd); validator != nil {
 		if err := validator(ctx, cmd); err != nil {
-			deferErr = cmd.handleExitCoder(ctx, err)
-			return ctx, deferErr
+			return ctx, cmd.handleExitCoder(ctx, err)
 		}
 	}
 
 	// Run Before actions in order.
+	var err error
 	if ctx, err = runBefore(ctx, cmdChain); err != nil {
-		deferErr = err
-		return ctx, deferErr
+		return ctx, err
 	}
 
 	// Run flag actions in order.
 	// These take a context, so this has to happen after Before actions.
-	for _, cmd := range cmdChain {
-		tracef("running flag actions (cmd=%[1]q)", cmd.Name)
-		if err := cmd.runFlagActions(ctx); err != nil {
-			deferErr = cmd.handleExitCoder(ctx, err)
-			return ctx, deferErr
+	for _, c := range cmdChain {
+		tracef("running flag actions (cmd=%[1]q)", c.Name)
+		if err := c.runFlagActions(ctx); err != nil {
+			return ctx, c.handleExitCoder(ctx, err)
 		}
 	}
 
-	var requiredErr error
-	if err := cmd.checkAllRequiredFlags(); err != nil {
-		requiredErr = err
-	} else if err := cmd.checkRequiredArguments(); err != nil {
-		requiredErr = err
-	}
-	if requiredErr != nil {
+	if requiredErr := cmd.checkRequirements(); requiredErr != nil {
 		return cmd.handleRequiredError(ctx, requiredErr)
 	}
 
-	// Run the command action.
+	// Parse positional arguments, if the command declares any.
 	if len(cmd.Arguments) > 0 {
-		rargs := cmd.Args().Slice()
-		tracef("calling argparse with %[1]v", rargs)
-		for _, arg := range cmd.Arguments {
-			var err error
-			rargs, err = arg.Parse(rargs)
-			if err != nil {
-				tracef("calling with %[1]v (cmd=%[2]q)", err, cmd.Name)
-				if _, ok := err.(*errRequiredArguments); ok {
-					return cmd.handleRequiredError(ctx, err)
-				}
-				if cmd.OnUsageError != nil {
-					err = cmd.OnUsageError(ctx, cmd, err, cmd.parent != nil)
-				}
-				err = cmd.handleExitCoder(ctx, err)
-				return ctx, err
-			}
+		if newCtx, err := cmd.parseArguments(ctx); err != nil {
+			return newCtx, err
 		}
-		cmd.parsedArgs = &stringSliceArgs{v: rargs}
 	}
 
 	if err := cmd.Action(ctx, cmd); err != nil {
 		tracef("calling handleExitCoder with %[1]v (cmd=%[2]q)", err, cmd.Name)
-		deferErr = cmd.handleExitCoder(ctx, err)
+		return ctx, cmd.handleExitCoder(ctx, err)
 	}
 
-	tracef("returning deferErr (cmd=%[1]q) %[2]q", cmd.Name, deferErr)
-	return ctx, deferErr
+	return ctx, nil
+}
+
+// setupRootArgs performs the argument preparation that only applies to the root
+// command: optionally reading extra args from stdin, then splitting off the
+// shell-completion flag before regular flag parsing sees it.
+func (cmd *Command) setupRootArgs(osArgs []string) ([]string, error) {
+	if cmd.ReadArgsFromStdin {
+		args, err := cmd.parseArgsFromStdin()
+		if err != nil {
+			return nil, err
+		}
+		osArgs = append(osArgs, args...)
+	}
+
+	// handle the completion flag separately from the flagset since
+	// completion could be attempted after a flag, but before its value was put
+	// on the command line. this causes the flagset to interpret the completion
+	// flag name as the value of the flag before it which is undesirable
+	// note that we can only do this because the shell autocomplete function
+	// always appends the completion flag at the end of the command
+	tracef("checking osArgs %v (cmd=%[2]q)", osArgs, cmd.Name)
+	cmd.shellCompletion, osArgs = checkShellCompleteFlag(cmd, osArgs)
+
+	tracef("setting cmd.shellCompletion=%[1]v from checkShellCompleteFlag (cmd=%[2]q)", cmd.shellCompletion && cmd.EnableShellCompletion, cmd.Name)
+	cmd.shellCompletion = cmd.EnableShellCompletion && cmd.shellCompletion
+
+	return osArgs, nil
+}
+
+// preParseFlags runs PreParse on every flag owned by this command, skipping
+// flags that are persistent flags inherited from an ancestor.
+func (cmd *Command) preParseFlags() error {
+	for _, f := range cmd.allFlags() {
+		if cmd.hasPersistentFlagOnAncestor(f) {
+			continue
+		}
+		if err := f.PreParse(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// runCompletionPhase runs the Before actions and then shell completion,
+// returning the context and error the caller should propagate.
+func (cmd *Command) runCompletionPhase(ctx context.Context) (context.Context, error) {
+	var beforeErr error
+	if ctx, beforeErr = runBefore(ctx, commandChain(cmd)); beforeErr != nil {
+		return ctx, beforeErr
+	}
+	runCompletion(ctx, cmd)
+	return ctx, nil
+}
+
+// postParseFlags runs PostParse on every flag, applies multi-value parsing
+// config, and records flags that became set via the environment.
+func (cmd *Command) postParseFlags() error {
+	for _, flag := range cmd.allFlags() {
+		cmd.setMultiValueParsingConfig(flag)
+		isSet := flag.IsSet()
+		if err := flag.PostParse(); err != nil {
+			return err
+		}
+		// add env set flags here
+		if !isSet && flag.IsSet() {
+			cmd.setFlags[flag] = struct{}{}
+		}
+	}
+	return nil
+}
+
+// runAfter executes the command's After action (invoked from a deferred call)
+// and folds any resulting error into the pending deferErr. Help output short
+// circuits the After action.
+func (cmd *Command) runAfter(ctx context.Context, deferErr error) error {
+	if ctx.Value(helpShownKey{}) != nil {
+		return deferErr
+	}
+	err := cmd.After(ctx, cmd)
+	if err == nil {
+		return deferErr
+	}
+	err = cmd.handleExitCoder(ctx, err)
+	if deferErr != nil {
+		return newMultiError(deferErr, err)
+	}
+	return err
+}
+
+// checkRequirements verifies that all required flags and arguments are present,
+// returning the first violation encountered (or nil).
+func (cmd *Command) checkRequirements() error {
+	if err := cmd.checkAllRequiredFlags(); err != nil {
+		return err
+	}
+	return cmd.checkRequiredArguments()
+}
+
+// handleParseError renders the appropriate help/usage output for a flag parsing
+// error and returns the context and error the caller should propagate.
+func (cmd *Command) handleParseError(ctx context.Context, err error) (context.Context, error) {
+	tracef("setting deferErr from %[1]q (cmd=%[2]q)", err, cmd.Name)
+	cmd.isInError = true
+
+	if cmd.checkHelp() {
+		ctx = context.WithValue(ctx, helpShownKey{}, true)
+		if cmd.parent == nil {
+			_ = ShowRootCommandHelp(cmd)
+		} else {
+			_ = ShowSubcommandHelp(cmd)
+		}
+		return ctx, nil
+	}
+
+	if cmd.OnUsageError != nil {
+		err = cmd.OnUsageError(ctx, cmd, err, cmd.parent != nil)
+		return ctx, cmd.handleExitCoder(ctx, err)
+	}
+
+	fmt.Fprintf(cmd.Root().ErrWriter, "Incorrect Usage: %s\n\n", err.Error())
+	if cmd.Suggest {
+		if suggestion, sErr := cmd.suggestFlagFromError(err, ""); sErr == nil {
+			fmt.Fprintf(cmd.Root().ErrWriter, "%s", suggestion)
+		}
+	}
+	if !cmd.hideHelp() {
+		cmd.showHelpForError()
+	}
+
+	return ctx, err
+}
+
+// showHelpForError prints the root or subcommand help after a usage error.
+func (cmd *Command) showHelpForError() {
+	if cmd.parent == nil {
+		tracef("running ShowRootCommandHelp")
+		if err := ShowRootCommandHelp(cmd); err != nil {
+			tracef("SILENTLY IGNORING ERROR running ShowRootCommandHelp %[1]v (cmd=%[2]q)", err, cmd.Name)
+		}
+		return
+	}
+	tracef("running ShowSubcommandHelp for %[1]q", cmd.Name)
+	_ = ShowSubcommandHelp(cmd)
+}
+
+// checkMutuallyExclusiveFlags walks the parent chain and validates every
+// mutually exclusive flag group, since persistent flags are inherited by
+// descendants. On violation it renders usage output and returns the error.
+func (cmd *Command) checkMutuallyExclusiveFlags(ctx context.Context) (context.Context, error) {
+	for pCmd := cmd; pCmd != nil; pCmd = pCmd.parent {
+		for _, grp := range pCmd.MutuallyExclusiveFlags {
+			if err := grp.check(cmd); err != nil {
+				return ctx, cmd.handleMutuallyExclusiveError(ctx, err)
+			}
+		}
+	}
+	return ctx, nil
+}
+
+// handleMutuallyExclusiveError renders the usage output for a mutually
+// exclusive flag violation and returns the error to surface (which may have
+// been transformed by a configured OnUsageError handler).
+func (cmd *Command) handleMutuallyExclusiveError(ctx context.Context, err error) error {
+	if cmd.OnUsageError != nil {
+		return cmd.OnUsageError(ctx, cmd, err, cmd.parent != nil)
+	}
+
+	fmt.Fprintf(cmd.Root().ErrWriter, "Incorrect Usage: %s\n\n", err.Error())
+	if cmd.parent == nil {
+		_ = ShowRootCommandHelp(cmd)
+	} else if helpErr := ShowCommandHelp(ctx, cmd.parent, cmd.Name); helpErr != nil {
+		_ = ShowSubcommandHelp(cmd)
+	}
+	return err
+}
+
+// resolveSubCommand selects the sub-command to dispatch to based on the parsed
+// positional arguments and any configured default command. It returns nil when
+// this command should execute its own action.
+func (cmd *Command) resolveSubCommand() *Command {
+	if cmd.parsedArgs.Present() {
+		return cmd.subCommandForArgs()
+	}
+
+	if cmd.DefaultCommand != "" {
+		tracef("no positional args present; checking default command %[1]q (cmd=%[2]q)", cmd.DefaultCommand, cmd.Name)
+		if dc := cmd.Command(cmd.DefaultCommand); dc != cmd {
+			return dc
+		}
+	}
+
+	return nil
+}
+
+// subCommandForArgs resolves a sub-command from the first positional argument,
+// falling back to the default command when no direct match is found.
+func (cmd *Command) subCommandForArgs() *Command {
+	tracef("checking positional args %[1]q (cmd=%[2]q)", cmd.parsedArgs, cmd.Name)
+
+	name := cmd.parsedArgs.First()
+	tracef("using first positional argument as sub-command name=%[1]q (cmd=%[2]q)", name, cmd.Name)
+
+	if cmd.SuggestCommandFunc != nil && name != "--" {
+		name = cmd.SuggestCommandFunc(cmd.Commands, name)
+		tracef("suggested command name=%1[q] (cmd=%[2]q)", name, cmd.Name)
+	}
+
+	if subCmd := cmd.Command(name); subCmd != nil {
+		return subCmd
+	}
+
+	if cmd.DefaultCommand == "" {
+		return nil
+	}
+
+	tracef("using default command=%[1]q (cmd=%[2]q)", cmd.DefaultCommand, cmd.Name)
+	argsWithDefault := cmd.argsWithDefaultCommand(cmd.parsedArgs)
+	tracef("using default command args=%[1]q (cmd=%[2]q)", argsWithDefault, cmd.Name)
+	cmd.parsedArgs = argsWithDefault
+	return cmd.Command(argsWithDefault.First())
+}
+
+// parseArguments runs each declared Argument parser over the remaining
+// positional args, updating cmd.parsedArgs on success. On failure it renders
+// the appropriate usage output and returns the error.
+func (cmd *Command) parseArguments(ctx context.Context) (context.Context, error) {
+	rargs := cmd.Args().Slice()
+	tracef("calling argparse with %[1]v", rargs)
+
+	for _, arg := range cmd.Arguments {
+		var err error
+		rargs, err = arg.Parse(rargs)
+		if err == nil {
+			continue
+		}
+
+		tracef("calling with %[1]v (cmd=%[2]q)", err, cmd.Name)
+		if _, ok := err.(*errRequiredArguments); ok {
+			return cmd.handleRequiredError(ctx, err)
+		}
+		if cmd.OnUsageError != nil {
+			err = cmd.OnUsageError(ctx, cmd, err, cmd.parent != nil)
+		}
+		return ctx, cmd.handleExitCoder(ctx, err)
+	}
+
+	cmd.parsedArgs = &stringSliceArgs{v: rargs}
+	return ctx, nil
 }
 
 func (cmd *Command) handleRequiredError(ctx context.Context, err error) (context.Context, error) {

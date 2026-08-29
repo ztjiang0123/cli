@@ -40,11 +40,5 @@ func (d *durationValue) String() string {
 }
 
 func (cmd *Command) Duration(name string) time.Duration {
-	if v, ok := cmd.Value(name).(time.Duration); ok {
-		tracef("duration available for flag name %[1]q with value=%[2]v (cmd=%[3]q)", name, v, cmd.Name)
-		return v
-	}
-
-	tracef("duration NOT available for flag name %[1]q (cmd=%[2]q)", name, cmd.Name)
-	return 0
+	return getFlagValue[time.Duration](cmd, name)
 }
