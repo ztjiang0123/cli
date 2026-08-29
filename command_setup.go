@@ -230,10 +230,11 @@ func flagNamesInUse(flags []Flag, names []string) bool {
 	return false
 }
 
-func (cmd *Command) hideHelp() bool {
-	tracef("hide help (cmd=%[1]q)", cmd.Name)
+// hiddenInLineage reports whether pick returns true for cmd or any of its
+// ancestors, walking the command lineage toward the root.
+func (cmd *Command) hiddenInLineage(pick func(*Command) bool) bool {
 	for c := cmd; c != nil; c = c.parent {
-		if c.HideHelp {
+		if pick(c) {
 			return true
 		}
 	}
@@ -241,15 +242,14 @@ func (cmd *Command) hideHelp() bool {
 	return false
 }
 
+func (cmd *Command) hideHelp() bool {
+	tracef("hide help (cmd=%[1]q)", cmd.Name)
+	return cmd.hiddenInLineage(func(c *Command) bool { return c.HideHelp })
+}
+
 func (cmd *Command) hideHelpCommand() bool {
 	tracef("hide help command (cmd=%[1]q)", cmd.Name)
-	for c := cmd; c != nil; c = c.parent {
-		if c.HideHelpCommand {
-			return true
-		}
-	}
-
-	return false
+	return cmd.hiddenInLineage(func(c *Command) bool { return c.HideHelpCommand })
 }
 
 func (cmd *Command) ensureHelp() {

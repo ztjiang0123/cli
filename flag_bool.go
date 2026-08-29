@@ -25,13 +25,7 @@ type boolValue struct {
 }
 
 func (cmd *Command) Bool(name string) bool {
-	if v, ok := cmd.Value(name).(bool); ok {
-		tracef("bool available for flag name %[1]q with value=%[2]v (cmd=%[3]q)", name, v, cmd.Name)
-		return v
-	}
-
-	tracef("bool NOT available for flag name %[1]q (cmd=%[2]q)", name, cmd.Name)
-	return false
+	return getFlagValue[bool](cmd, name)
 }
 
 // Below functions are to satisfy the ValueCreator interface
