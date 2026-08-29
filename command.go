@@ -673,14 +673,26 @@ func (cmd *Command) runFlagActions(ctx context.Context) error {
 	// run the flag actions in the same order that they are defined
 	// to maintain consistency.
 	for _, fl := range cmd.appliedFlags {
-		if _, inSet := cmd.setFlags[fl]; inSet {
-			if af, ok := fl.(ActionableFlag); ok {
-				if err := af.RunAction(ctx, cmd); err != nil {
-					return err
-				}
-			}
+		if err := cmd.runFlagAction(ctx, fl); err != nil {
+			return err
 		}
 	}
 
 	return nil
+}
+
+// runFlagAction runs the action associated with fl, if fl was set on the
+// command line and exposes an action. Flags that were not set or that do not
+// implement ActionableFlag are skipped.
+func (cmd *Command) runFlagAction(ctx context.Context, fl Flag) error {
+	if _, inSet := cmd.setFlags[fl]; !inSet {
+		return nil
+	}
+
+	af, ok := fl.(ActionableFlag)
+	if !ok {
+		return nil
+	}
+
+	return af.RunAction(ctx, cmd)
 }
